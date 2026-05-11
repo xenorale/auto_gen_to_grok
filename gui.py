@@ -6,86 +6,63 @@ import builtins
 import importlib
 import time
 
-# --- ЦВЕТОВАЯ ПАЛИТРА GLASSMORPHISM ---
+ACCENT_COLOR = "#007AFF"
 GLASS_BG = ft.colors.with_opacity(0.4, "#1F1F1F")
-GLASS_BORDER_COLOR = ft.colors.with_opacity(0.15, "#FFFFFF")
-ACCENT_BLUE = "#007AFF"
+GLASS_BORDER = ft.colors.with_opacity(0.15, "#FFFFFF")
 
-class RedirectStdOut:
-    def __init__(self, log_fn):
-        self.log_fn = log_fn
-    def write(self, msg):
-        if isinstance(msg, bytes):
-            msg = msg.decode('utf-8', errors='replace')
-        msg = msg.strip()
-        if msg and not any(x in msg for x in ["browser_type", "node_modules", "=="]):
-            self.log_fn(msg)
+class LogBridge:
+    def __init__(self, sink):
+        self.sink = sink
+    def write(self, buf):
+        if isinstance(buf, bytes):
+            buf = buf.decode('utf-8', errors='replace')
+        val = buf.strip()
+        if val and not any(x in val for x in ["browser_type", "node_modules", "=="]):
+            self.sink(val)
     def flush(self): pass
     def reconfigure(self, **kwargs): pass
     def detach(self): return self
 
-class AutoGrokApp:
+class StudioApp:
     def __init__(self, page: ft.Page):
         self.page = page
-        self.wait_event = threading.Event()
-        self.is_running = False
-        self.mode_var = "2" # 1: 9:16, 2: 16:9
-        self.command_queue = []
-        self.saved_items = set()
-        
-        self.setup_ui()
+        self.nexus = threading.Event()
+        self.active = False
+        self.ar_mode = "2"
+        self.pending_tasks = []
+        self.completed = set()
+        self._build_interface()
 
-    def setup_ui(self):
+    def _build_interface(self):
         self.page.title = "Auto Grok Studio"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window_width = 850
         self.page.window_height = 950
         self.page.window_center()
         self.page.padding = 0
-        self.page.spacing = 0
         self.page.bgcolor = ft.colors.BLACK
 
-        # --- UI Components ---
-        
-        # Header
-        self.title_text = ft.Text(
-            "Auto Grok Studio",
-            size=48,
-            weight=ft.FontWeight.W_200, 
-            color=ft.colors.WHITE,
-            text_align=ft.TextAlign.CENTER
-        )
-        
-        self.status_dot = ft.Container(width=10, height=10, border_radius=5, bgcolor=ft.colors.GREY_700)
-        self.status_text = ft.Text("Ready", size=14, color=ft.colors.GREY_400)
-        
-        # Path Entry & Picker
-        self.file_picker = ft.FilePicker(on_result=self.on_path_result)
-        self.page.overlay.append(self.file_picker)
+        self.title = ft.Text("Auto Grok Studio", size=48, weight=ft.FontWeight.W_200, color=ft.colors.WHITE)
+        self.indicator = ft.Container(width=10, height=10, border_radius=5, bgcolor=ft.colors.GREY_700)
+        self.status = ft.Text("Ready", size=14, color=ft.colors.GREY_400)
 
-        self.path_input = ft.TextField(
-            hint_text="Project path (leave empty for current folder)...",
+        self.picker = ft.FilePicker(on_result=self._on_path_selection)
+        self.page.overlay.append(self.picker)
+
+        self.path_field = ft.TextField(
+            hint_text="Project destination...",
             bgcolor=ft.colors.with_opacity(0.2, "#000000"),
-            border_color=GLASS_BORDER_COLOR,
+            border_color=GLASS_BORDER,
             border_radius=15,
             height=55,
-            text_size=15,
-            content_padding=ft.padding.only(left=20, top=0, right=20, bottom=0),
             expand=True,
             border_width=1
         )
-        
-        self.pick_btn = ft.IconButton(
-            icon=ft.icons.FOLDER_OPEN_ROUNDED,
-            icon_color=ft.colors.WHITE,
-            on_click=lambda _: self.file_picker.get_directory_path()
-        )
-        
-        # Mode Switcher
-        self.mode_toggle = ft.SegmentedButton(
+
+        self.ar_selector = ft.SegmentedButton(
             selected={"16:9"},
             allow_multiple_selection=False,
-            on_change=self.on_mode_change,
+            on_change=self._on_ar_switch,
             segments=[
                 ft.Segment(value="9:16", label=ft.Text("9:16", size=12)),
                 ft.Segment(value="16:9", label=ft.Text("16:9", size=12)),
@@ -93,313 +70,206 @@ class AutoGrokApp:
             show_selected_icon=False
         )
 
-        # Log Console
-        self.log_content = ft.ListView(expand=True, spacing=4, padding=10)
-        
-        # Gallery Preview
-        self.gallery_row = ft.Row(
-            spacing=10,
-            scroll=ft.ScrollMode.ALWAYS,
+        self.console = ft.ListView(expand=True, spacing=4, padding=10)
+        self.gallery = ft.Row(spacing=10, scroll=ft.ScrollMode.ALWAYS)
+
+        self.run_btn = ft.ElevatedButton(
+            content=ft.Text("Launch Session", size=16, weight=ft.FontWeight.BOLD),
+            style=ft.ButtonStyle(color=ft.colors.WHITE, bgcolor=ACCENT_COLOR, shape=ft.RoundedRectangleBorder(radius=25)),
+            width=260, height=60, on_click=lambda _: self._launch_engine()
         )
 
-        # Action Buttons
-        self.launch_btn = ft.ElevatedButton(
-            content=ft.Text("Launch Session", size=16, weight=ft.FontWeight.BOLD),
-            style=ft.ButtonStyle(
-                color=ft.colors.WHITE,
-                bgcolor=ACCENT_BLUE,
-                shape=ft.RoundedRectangleBorder(radius=25),
-            ),
-            width=260,
-            height=60,
-            on_click=lambda _: self.start_bot()
-        )
-        
-        self.confirm_btn = ft.OutlinedButton(
+        self.next_btn = ft.OutlinedButton(
             content=ft.Text("Confirm", size=16, weight=ft.FontWeight.BOLD),
             style=ft.ButtonStyle(
                 color=ft.colors.with_opacity(0.4, "#FFFFFF"),
                 shape=ft.RoundedRectangleBorder(radius=25),
-                side={ft.ControlState.DEFAULT: ft.BorderSide(1, GLASS_BORDER_COLOR)},
+                side={ft.ControlState.DEFAULT: ft.BorderSide(1, GLASS_BORDER)},
             ),
-            width=200,
-            height=60,
-            disabled=True,
-            on_click=lambda _: self.continue_bot()
+            width=200, height=60, disabled=True, on_click=lambda _: self._resume_flow()
         )
 
-        # Layout Assembly
         self.page.add(
             ft.Container(
                 expand=True,
                 gradient=ft.LinearGradient(
-                    begin=ft.alignment.top_left,
-                    end=ft.alignment.bottom_right,
-                    colors=["#0f0c29", "#302b63", "#24243e"],
+                    begin=ft.alignment.top_left, end=ft.alignment.bottom_right,
+                    colors=["#0f0c29", "#302b63", "#24243e"]
                 ),
-                content=ft.Column(
-                    controls=[
-                        # Header Section
-                        ft.Container(
-                            content=ft.Column([
-                                self.title_text,
-                                ft.Row([self.status_dot, self.status_text], alignment=ft.MainAxisAlignment.CENTER, spacing=10)
-                            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                            margin=ft.margin.only(top=60, bottom=40),
-                            alignment=ft.alignment.center
-                        ),
-                        
-                        # Controls Panel
-                        self.glass_panel(
-                            content=ft.Row([
-                                self.path_input,
-                                self.pick_btn,
-                                self.mode_toggle
-                            ], spacing=10)
-                        ),
-                        
-                        # Gallery Panel
-                        self.glass_panel(
-                            content=self.gallery_row,
-                            height=180
-                        ),
-                        
-                        # Console Panel
-                        self.glass_panel(
-                            content=self.log_content,
-                            expand=True
-                        ),
-                        
-                        # Footer Actions
-                        ft.Container(
-                            content=ft.Row([
-                                self.launch_btn,
-                                self.confirm_btn
-                            ], alignment=ft.MainAxisAlignment.CENTER, spacing=30),
-                            margin=ft.margin.only(bottom=60, top=20)
-                        )
-                    ],
-                    expand=True
-                )
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Column([
+                            self.title,
+                            ft.Row([self.indicator, self.status], alignment=ft.MainAxisAlignment.CENTER, spacing=10)
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                        margin=ft.margin.only(top=60, bottom=40)
+                    ),
+                    self._wrap_glass(ft.Row([
+                        self.path_field,
+                        ft.IconButton(ft.icons.FOLDER_OPEN_ROUNDED, on_click=lambda _: self.picker.get_directory_path()),
+                        self.ar_selector
+                    ], spacing=10)),
+                    self._wrap_glass(self.gallery, height=180),
+                    self._wrap_glass(self.console, expand=True),
+                    ft.Container(
+                        content=ft.Row([self.run_btn, self.next_btn], alignment=ft.MainAxisAlignment.CENTER, spacing=30),
+                        margin=ft.margin.only(bottom=60, top=20)
+                    )
+                ])
             )
         )
 
-    def on_path_result(self, e: ft.FilePickerResultEvent):
-        if e.path:
-            self.path_input.value = e.path
-            self.page.update()
-        else:
-            self.log("📂 Выбор папки отменен.")
-
-    def glass_panel(self, content, expand=False):
+    def _wrap_glass(self, content, height=None, expand=False):
         return ft.Container(
-            content=content,
-            bgcolor=GLASS_BG,
-            blur=ft.Blur(sigma_x=15, sigma_y=15),
-            border=ft.border.all(1, GLASS_BORDER_COLOR),
-            border_radius=20,
-            padding=20,
-            margin=ft.margin.symmetric(horizontal=30, vertical=15),
-            expand=expand
+            content=content, height=height, expand=expand,
+            bgcolor=GLASS_BG, blur=ft.Blur(15, 15),
+            border=ft.border.all(1, GLASS_BORDER), border_radius=20,
+            padding=20, margin=ft.margin.symmetric(horizontal=30, vertical=15)
         )
 
-    def on_mode_change(self, e):
-        # В стабильных версиях e.selection - это множество (set)
-        self.mode_var = "1" if "9:16" in e.selection else "2"
+    def _on_path_selection(self, e: ft.FilePickerResultEvent):
+        if e.path:
+            self.path_field.value = e.path
+            self.page.update()
 
-    def log(self, msg):
-        self.log_content.controls.append(
-            ft.Text(msg, color="#D1D1D6", font_family="Consolas", size=12)
-        )
-        if len(self.log_content.controls) > 500:
-            self.log_content.controls.pop(0)
-        
-        # Авто-прокрутка вниз
-        self.log_content.scroll_to(offset=-1, duration=100)
+    def _on_ar_switch(self, e):
+        self.ar_mode = "1" if "9:16" in e.selection else "2"
+
+    def _write_log(self, val):
+        self.console.controls.append(ft.Text(val, color="#D1D1D6", font_family="Consolas", size=12))
+        if len(self.console.controls) > 500: self.console.controls.pop(0)
+        self.console.scroll_to(offset=-1, duration=100)
         self.page.update()
 
-    def enable_continue(self):
-        self.confirm_btn.disabled = False
-        self.confirm_btn.style.side = {ft.ControlState.DEFAULT: ft.BorderSide(2, ACCENT_BLUE)}
-        self.confirm_btn.content.color = ft.colors.WHITE
-        self.status_dot.bgcolor = ft.colors.ORANGE
-        self.status_text.value = "Waiting"
-        self.status_text.color = ft.colors.ORANGE
-        self.log("\n[SYSTEM] Ready for next step. Click Confirm.")
+    def _toggle_wait(self, state):
+        self.next_btn.disabled = not state
+        self.next_btn.style.side = {ft.ControlState.DEFAULT: ft.BorderSide(2, ACCENT_COLOR if state else GLASS_BORDER)}
+        self.next_btn.content.color = ft.colors.WHITE if state else ft.colors.with_opacity(0.4, "#FFFFFF")
+        self.indicator.bgcolor = ft.colors.ORANGE if state else ft.colors.BLUE
+        self.status.value = "Waiting" if state else "Active"
+        self.status.color = ft.colors.ORANGE if state else ft.colors.BLUE
+        if state: self._write_log("\n[CORE] System idle. Interaction required.")
         self.page.update()
 
-    def continue_bot(self):
-        self.confirm_btn.disabled = True
-        self.confirm_btn.style.side = {ft.ControlState.DEFAULT: ft.BorderSide(1, GLASS_BORDER_COLOR)}
-        self.confirm_btn.content.color = ft.colors.with_opacity(0.4, "#FFFFFF")
-        self.status_dot.bgcolor = ft.colors.BLUE
-        self.status_text.value = "Active"
-        self.status_text.color = ft.colors.BLUE
-        self.wait_event.set()
-        self.page.update()
+    def _resume_flow(self):
+        self._toggle_wait(False)
+        self.nexus.set()
 
-    def start_bot(self):
-        if self.is_running: return
-        self.log_content.controls.clear()
-        self.launch_btn.disabled = True
-        self.launch_btn.bgcolor = ft.colors.GREY_800
-        self.status_dot.bgcolor = ft.colors.GREEN
-        self.status_text.value = "Active"
-        self.status_text.color = ft.colors.GREEN
-        self.is_running = True
-        self.wait_event.clear()
+    def _launch_engine(self):
+        if self.active: return
+        self.console.controls.clear()
+        self.gallery.controls.clear()
+        self.run_btn.disabled = True
+        self.run_btn.bgcolor = ft.colors.GREY_800
+        self.indicator.bgcolor = ft.colors.GREEN
+        self.status.value = "Active"
+        self.status.color = ft.colors.GREEN
+        self.active = True
+        self.nexus.clear()
         self.page.update()
-        
-        self.log("🚀 Initializing Bot...")
-        self.log("ℹ️ Make sure Chrome is CLOSED before launching.")
-        
-        threading.Thread(target=self.run_process, daemon=True).start()
+        threading.Thread(target=self._executor, daemon=True).start()
 
-    def run_process(self):
-        base_dir = self.path_input.value.strip() or os.path.dirname(os.path.abspath(__file__))
-        mode_choice = self.mode_var
+    def _executor(self):
+        root = self.path_field.value.strip() or os.path.dirname(os.path.abspath(__file__))
+        mode = self.ar_mode
+        out_orig = sys.stdout
+        sys.stdout = LogBridge(self._write_log)
+        in_orig = builtins.input
         
-        old_stdout = sys.stdout
-        sys.stdout = RedirectStdOut(self.log)
-        old_input = builtins.input
-        
-        def mock_input(prompt=""):
-            if "папке проекта" in prompt: return base_dir
-            if "вариант" in prompt: return mode_choice
-            # Signal UI to enable "Confirm" button
-            self.enable_continue()
-            self.wait_event.wait()
-            self.wait_event.clear()
+        def bridge_input(prompt=""):
+            if "папке проекта" in prompt: return root
+            if "вариант" in prompt: return mode
+            self._toggle_wait(True)
+            self.nexus.wait()
+            self.nexus.clear()
             return ""
         
-        builtins.input = mock_input
-        
+        builtins.input = bridge_input
         try:
             if os.getcwd() not in sys.path: sys.path.insert(0, os.getcwd())
             import bot
             importlib.reload(bot)
-            bot.main(preview_callback=self.handle_preview)
+            bot.main(ui_bridge=self._render_preview)
         except Exception as e:
-            self.log(f"\n[ERROR] {str(e)}")
+            self._write_log(f"\n[FAULT] {str(e)}")
         finally:
-            sys.stdout = old_stdout
-            builtins.input = old_input
-            self.on_finish()
+            sys.stdout = out_orig
+            builtins.input = in_orig
+            self._finalize()
 
-    def on_finish(self):
-        self.launch_btn.disabled = False
-        self.launch_btn.bgcolor = ACCENT_BLUE
-        self.confirm_btn.disabled = True
-        self.confirm_btn.style.side = {ft.ControlState.DEFAULT: ft.BorderSide(1, GLASS_BORDER_COLOR)}
-        self.status_dot.bgcolor = ft.colors.GREY_700
-        self.status_text.value = "Ready"
-        self.status_text.color = ft.colors.GREY_400
-        self.is_running = False
-        self.log("\n[FINISH] Process completed.")
+    def _finalize(self):
+        self.run_btn.disabled = False
+        self.run_btn.bgcolor = ACCENT_COLOR
+        self.next_btn.disabled = True
+        self.indicator.bgcolor = ft.colors.GREY_700
+        self.status.value = "Ready"
+        self.active = False
+        self._write_log("\n[CORE] Pipeline terminated.")
         self.page.update()
 
-    def handle_preview(self, name, data, is_video):
-        # Если name - None, значит это опрос очереди команд от бота
+    def _render_preview(self, name, data, is_vid):
         if name is None:
-            if self.command_queue:
-                cmd = self.command_queue.pop(0)
+            if self.pending_tasks:
+                cmd = self.pending_tasks.pop(0)
                 if cmd['action'] == 'save':
-                    self.saved_items.add(cmd['name'])
-                    self.update_card_status(cmd['name'], True)
+                    self.completed.add(cmd['name'])
+                    self._sync_card(cmd['name'])
                 return cmd
             return None
 
         is_b64 = data and not data.startswith("http")
-        
-        # Функция для кнопок
-        def on_action(action_type):
-            self.command_queue.append({"name": name, "action": action_type})
-            self.log(f"🛠 GUI command: {action_type.upper()} for {name}")
+        is_done = name in self.completed
 
-        is_saved = name in self.saved_items
-        border_color = ft.colors.GREEN_ACCENT if is_saved else GLASS_BORDER_COLOR
-        border_width = 3 if is_saved else 1
+        def post_cmd(act):
+            self.pending_tasks.append({"name": name, "action": act})
+            self._write_log(f"[UI] Request: {act.upper()} -> {name}")
 
-        content_stack = ft.Stack([
+        stack = ft.Stack([
             ft.Column([
-                ft.Image(
-                    src_base64=data if is_b64 else None,
-                    src=data if (data and not is_b64) else None,
-                    width=120, height=120, fit=ft.ImageFit.CONTAIN
-                ) if not is_video else ft.Icon(ft.icons.VIDEOCAM_ROUNDED, color=ACCENT_BLUE, size=60),
-                ft.Text(name, size=10, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER, width=120, no_wrap=False)
-            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            
-            # Overlay Buttons (скрываем если уже сохранено)
+                ft.Image(src_base64=data if is_b64 else None, src=data if (data and not is_b64) else None,
+                         width=120, height=120, fit=ft.ImageFit.CONTAIN) if not is_vid else 
+                ft.Icon(ft.icons.VIDEOCAM_ROUNDED, color=ACCENT_COLOR, size=60),
+                ft.Text(name, size=10, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER, width=120)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(
                 content=ft.Row([
-                    ft.IconButton(
-                        icon=ft.icons.SAVE_ROUNDED, 
-                        icon_color=ft.colors.GREEN_ACCENT,
-                        bgcolor=ft.colors.with_opacity(0.8, ft.colors.BLACK),
-                        on_click=lambda _: on_action('save'),
-                        tooltip="Save this version"
-                    ),
-                    ft.IconButton(
-                        icon=ft.icons.REFRESH_ROUNDED, 
-                        icon_color=ft.colors.ORANGE_ACCENT,
-                        bgcolor=ft.colors.with_opacity(0.8, ft.colors.BLACK),
-                        on_click=lambda _: on_action('regen'),
-                        tooltip="Regenerate"
-                    ),
-                ], alignment=ft.MainAxisAlignment.CENTER, spacing=0),
-                alignment=ft.alignment.bottom_center,
-                padding=ft.padding.only(bottom=25),
-                visible=not is_saved
+                    ft.IconButton(ft.icons.SAVE_ROUNDED, icon_color=ft.colors.GREEN_ACCENT, 
+                                  bgcolor=ft.colors.with_opacity(0.8, ft.colors.BLACK), on_click=lambda _: post_cmd('save')),
+                    ft.IconButton(ft.icons.REFRESH_ROUNDED, icon_color=ft.colors.ORANGE_ACCENT, 
+                                  bgcolor=ft.colors.with_opacity(0.8, ft.colors.BLACK), on_click=lambda _: post_cmd('regen')),
+                ], alignment=ft.MainAxisAlignment.CENTER),
+                alignment=ft.alignment.bottom_center, padding=ft.padding.only(bottom=25), visible=not is_done
             )
         ])
 
-        preview = ft.Container(
-            content=content_stack,
-            padding=5, border_radius=15, 
-            bgcolor=ft.colors.with_opacity(0.1, "#FFFFFF"),
-            border=ft.border.all(border_width, border_color),
-            width=140,
-            height=160
+        card = ft.Container(
+            content=stack, padding=5, border_radius=15, bgcolor=ft.colors.with_opacity(0.1, "#FFFFFF"),
+            border=ft.border.all(3 if is_done else 1, ft.colors.GREEN_ACCENT if is_done else GLASS_BORDER),
+            width=140, height=160
         )
-        
-        # Проверяем, нет ли уже такого имени в галерее
-        found = False
-        for i, ctrl in enumerate(self.gallery_row.controls):
+
+        for i, c in enumerate(self.gallery.controls):
             try:
-                ctrl_name = ctrl.content.controls[0].controls[1].value
-                if ctrl_name == name:
-                    self.gallery_row.controls[i] = preview
-                    found = True
-                    break
+                if c.content.controls[0].controls[1].value == name:
+                    self.gallery.controls[i] = card
+                    self.page.update()
+                    return self.pending_tasks.pop(0) if self.pending_tasks else None
             except: pass
 
-        if not found:
-            self.gallery_row.controls.insert(0, preview)
-            if len(self.gallery_row.controls) > 30:
-                self.gallery_row.controls.pop()
-        
+        self.gallery.controls.insert(0, card)
+        if len(self.gallery.controls) > 30: self.gallery.controls.pop()
         self.page.update()
-        
-        if self.command_queue:
-            cmd = self.command_queue.pop(0)
-            if cmd['action'] == 'save':
-                self.saved_items.add(cmd['name'])
-                self.update_card_status(cmd['name'], True)
-            return cmd
-        return None
+        return self.pending_tasks.pop(0) if self.pending_tasks else None
 
-    def update_card_status(self, name, is_saved):
-        for ctrl in self.gallery_row.controls:
+    def _sync_card(self, name):
+        for c in self.gallery.controls:
             try:
-                ctrl_name = ctrl.content.controls[0].controls[1].value
-                if ctrl_name == name:
-                    ctrl.border = ft.border.all(3, ft.colors.GREEN_ACCENT)
-                    # Скрываем кнопки
-                    ctrl.content.controls[1].visible = False
+                if c.content.controls[0].controls[1].value == name:
+                    c.border = ft.border.all(3, ft.colors.GREEN_ACCENT)
+                    c.content.controls[1].visible = False
                     self.page.update()
                     break
             except: pass
 
 if __name__ == "__main__":
-    ft.app(target=AutoGrokApp)
+    ft.app(target=StudioApp)

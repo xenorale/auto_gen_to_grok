@@ -1,0 +1,4 @@
+scene_id,char_id,scene_prompt,motion_prompt
+1,newton,"Newton panda sitting under an apple tree, holding a glowing apple, Studio Ghibli style. --cref [REF] --cw 100","The apple glows brighter, leaves rustle in the wind."
+2,leibniz,"Wise owl Leibniz writing in a giant parchment with a quill, Studio Ghibli style. --cref [REF] --cw 100","The quill moves rapidly, ink splashes slightly."
+3,da_vinci,"Fox Da Vinci painting a flying machine on a canvas, Studio Ghibli style. --cref [REF] --cw 100","The fox brushes the canvas, the flying machine in the background slightly vibrates."

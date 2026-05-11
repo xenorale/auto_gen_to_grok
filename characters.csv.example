@@ -1,0 +1,4 @@
+char_id,base_ref_path,char_prompt
+newton,D:/YS/PR_1 PANDAS/Reference_Panda.jpg,"A red panda character, full body, Studio Ghibli vibes. --ar 2:3 --v 6"
+leibniz,D:/YS/PR_1 PANDAS/Reference_Panda.jpg,"A wise owl character, 17th-century historical clothing, Studio Ghibli vibes. --ar 2:3 --v 6"
+da_vinci,D:/YS/PR_1 PANDAS/Reference_Panda.jpg,"A creative fox character, Renaissance clothing, Studio Ghibli vibes. --ar 2:3 --v 6"

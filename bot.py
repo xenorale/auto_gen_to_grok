@@ -12,14 +12,11 @@ import threading
 import random
 import json
 
-# Настройка путей
-CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-USER_DATA_DIR = r"C:\chrome_debug_profile"
+# Настройка путей (будут перезаписаны конфигом в main)
+CHROME_PATH = ""
+USER_DATA_DIR = ""
 
-print("\n" + "="*40)
-print("📂 НАСТРОЙКА РАБОЧЕЙ ПАПКИ")
-BASE_DIR = input("Введите путь к папке проекта (или Enter для текущей): ").strip()
-if not BASE_DIR: BASE_DIR = os.getcwd()
+BASE_DIR = os.getcwd()
 
 PHOTO_PATH = os.path.join(BASE_DIR, "photo")
 VIDEO_PATH = os.path.join(BASE_DIR, "video")

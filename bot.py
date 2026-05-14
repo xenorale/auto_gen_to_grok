@@ -469,7 +469,10 @@ def main(progress_callback=None, ui_bridge=None, base_dir=None, ar_mode="16:9"):
                 counter += 1
                 if progress_callback: progress_callback(counter / total)
 
-            char_chunks = [chars[i:i + 3] for i in range(0, len(chars), 3)]
+            # Выставляем размер порций в зависимости от формата
+            chunk_size = 15 if ar_mode == "16:9" else 999
+            
+            char_chunks = [chars[i:i + chunk_size] for i in range(0, len(chars), chunk_size)]
             for chunk in char_chunks:
                 active_tabs, active_names = [], []
                 for c in chunk:
@@ -490,7 +493,7 @@ def main(progress_callback=None, ui_bridge=None, base_dir=None, ar_mode="16:9"):
                     for _ in active_tabs: bump()
                     for t in active_tabs: t.close()
 
-            scene_chunks = [scenes[i:i + 3] for i in range(0, len(scenes), 3)]
+            scene_chunks = [scenes[i:i + chunk_size] for i in range(0, len(scenes), chunk_size)]
             for idx, chunk in enumerate(scene_chunks):
                 pending_img, pending_vid = [], []
                 for s in chunk:

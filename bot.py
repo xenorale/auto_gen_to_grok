@@ -469,27 +469,29 @@ def main(progress_callback=None, ui_bridge=None, base_dir=None, ar_mode="16:9"):
                 counter += 1
                 if progress_callback: progress_callback(counter / total)
 
-            active_tabs, active_names = [], []
-            for c in chars:
-                if any(os.path.exists(os.path.join(PHOTO_PATH, f"{c['char_id']}{e}")) for e in [".jpg", ".webp", ".png"]) or c['char_id'] in state['chars']:
-                    bump()
-                    continue
-                t = ctx.new_page()
-                apply_stealth(t)
-                active_tabs.append(t); active_names.append(c['char_id'])
-                sync_browser_context(t)
-                inject_persistence_layer(t, c['char_id'])
-                set_workflow_mode(t, "image")
-                jitter(1, 2)
-                dispatch_prompt(t, c['char_prompt'], ar_mode)
-            
-            if active_tabs:
-                orchestrate_session(active_tabs, active_names, "chars", ui_bridge)
-                for _ in active_tabs: bump()
-                for t in active_tabs: t.close()
+            char_chunks = [chars[i:i + 3] for i in range(0, len(chars), 3)]
+            for chunk in char_chunks:
+                active_tabs, active_names = [], []
+                for c in chunk:
+                    if any(os.path.exists(os.path.join(PHOTO_PATH, f"{c['char_id']}{e}")) for e in [".jpg", ".webp", ".png"]) or c['char_id'] in state['chars']:
+                        bump()
+                        continue
+                    t = ctx.new_page()
+                    apply_stealth(t)
+                    active_tabs.append(t); active_names.append(c['char_id'])
+                    sync_browser_context(t)
+                    inject_persistence_layer(t, c['char_id'])
+                    set_workflow_mode(t, "image")
+                    jitter(1, 2)
+                    dispatch_prompt(t, c['char_prompt'], ar_mode)
+                
+                if active_tabs:
+                    orchestrate_session(active_tabs, active_names, "chars", ui_bridge)
+                    for _ in active_tabs: bump()
+                    for t in active_tabs: t.close()
 
-            chunks = [scenes[i:i + 15] for i in range(0, len(scenes), 15)]
-            for idx, chunk in enumerate(chunks):
+            scene_chunks = [scenes[i:i + 3] for i in range(0, len(scenes), 3)]
+            for idx, chunk in enumerate(scene_chunks):
                 pending_img, pending_vid = [], []
                 for s in chunk:
                     if not any(os.path.exists(os.path.join(PHOTO_PATH, f"{s['scene_id']}{e}")) for e in [".jpg", ".webp", ".png"]) and s['scene_id'] not in state['scenes']:

@@ -105,7 +105,8 @@ def bridge_connection():
             is_headless = is_headless.lower() == 'true'
 
         headless_args = "--headless --disable-gpu" if is_headless else ""
-        base_args = "--no-first-run --no-default-browser-check --disable-dev-shm-usage --mute-audio --disk-cache-size=104857600" # 100MB cache limit
+        # 100MB cache limit + Anti-throttling flags to prevent background tabs from freezing
+        base_args = "--no-first-run --no-default-browser-check --disable-dev-shm-usage --mute-audio --disk-cache-size=104857600 --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding" 
         # Manual proxy support
         proxy_arg = f"--proxy-server=\"{runtime_config['proxy']}\"" if runtime_config.get("proxy") else ""
         

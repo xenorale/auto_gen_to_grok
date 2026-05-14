@@ -22,7 +22,8 @@ def load_config():
         "user_data_dir": r"C:\chrome_debug_profile",
         "debug_port": 9222,
         "stealth_mode": True,
-        "headless": True
+        "headless": True,
+        "proxy": "" # Added for manual proxy support
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -86,84 +87,118 @@ def is_port_in_use(port):
         return s.connect_ex(('localhost', port)) == 0
 
 def bridge_connection():
-    # Only attempt to reset if the port is actually in use
     debug_port = runtime_config.get("debug_port", 9222)
     if is_port_in_use(debug_port):
-        print(f"[CORE] Port {debug_port} is busy. Checking connection...")
-        try:
-            # We try to connect to see if it's already our Chrome or something else
-            # But for simplicity and safety, if it's busy, we'll just try to use it
-            # instead of blindly killing. 
-            # However, if the user wants it to be 'background', we should ensure 
-            # the instance we want is the one running.
-            pass 
-        except: pass
+        print(f"[CORE] Port {debug_port} is busy. Using existing instance...")
     else:
-        print("[CORE] Launching background browser...")
-        # Most reliable combination of flags for headless mode in Chrome
+        print("[CORE] Launching browser...")
+        # Clear cache/shader cache to speed up
+        user_data = runtime_config.get("user_data_dir", r"C:\chrome_debug_profile")
+        try:
+            import shutil
+            shutil.rmtree(os.path.join(user_data, "Default", "Cache"), ignore_errors=True)
+            shutil.rmtree(os.path.join(user_data, "ShaderCache"), ignore_errors=True)
+        except: pass
+
         is_headless = runtime_config.get("headless", True)
         if isinstance(is_headless, str):
             is_headless = is_headless.lower() == 'true'
-            
-        headless_args = "--headless --disable-gpu --window-size=1920,1080" if is_headless else ""
-        silent_args = "--log-level=3 --silent --disable-logging"
-        user_data = runtime_config.get("user_data_dir", r"C:\chrome_debug_profile")
+
+        headless_args = "--headless --disable-gpu" if is_headless else ""
+        base_args = "--no-first-run --no-default-browser-check --disable-dev-shm-usage --mute-audio --disk-cache-size=104857600" # 100MB cache limit
+        # Manual proxy support
+        proxy_arg = f"--proxy-server=\"{runtime_config['proxy']}\"" if runtime_config.get("proxy") else ""
+        
         chrome_exe = runtime_config.get("chrome_path", r"C:\Program Files\Google\Chrome\Application\chrome.exe")
         
-        debug_port = runtime_config.get("debug_port", 9222)
-        cmd = f'"{chrome_exe}" --remote-debugging-port={debug_port} --user-data-dir="{user_data}" {headless_args} {silent_args}'
+        cmd = f'"{chrome_exe}" --remote-debugging-port={debug_port} --user-data-dir="{user_data}" {headless_args} {base_args} {proxy_arg} --log-level=3'
         subprocess.Popen(cmd, shell=True)
-        time.sleep(3)
-    return True
+        time.sleep(5)
 
 def sync_browser_context(page: Page):
     try:
-        page.goto("https://grok.com/imagine", wait_until="commit", timeout=30000)
-    except: pass
+        # Add network logging to diagnose slow loading
+        request_starts = {}
+        def on_request(request):
+            request_starts[request] = time.time()
+            
+        def on_response(response):
+            req = response.request
+            if req in request_starts:
+                duration = time.time() - request_starts[req]
+                if duration > 3.0:  # Log resources taking >3s
+                    try:
+                        print(f"[NETWORK] Долгий запрос ({duration:.1f} сек): {req.url[:100]}...")
+                    except: pass
+
+        page.on("request", on_request)
+        page.on("response", on_response)
+
+        start_t = time.time()
+        print("[NETWORK] Начало загрузки страницы (https://grok.com/imagine)...")
+        
+        # Block known trackers to speed up VPN connections
+        def block_trackers(route):
+            url = route.request.url
+            if any(t in url for t in ["google-analytics", "googletagmanager", "sentry", "datadog", "telemetry"]):
+                route.abort()
+            else:
+                route.continue_()
+                
+        page.route("**/*", block_trackers)
+
+        # Wait a bit longer and use a more reliable wait state
+        page.goto("https://grok.com/imagine", wait_until="domcontentloaded", timeout=60000)
+        
+        end_t = time.time()
+        print(f"[NETWORK] Страница загружена за {end_t - start_t:.1f} сек.")
+        
+        # Give it a moment to settle dynamic elements
+        time.sleep(2)
+    except Exception as e:
+        print(f"[NETWORK] Ошибка/Таймаут загрузки: {e}")
 
 def set_workflow_mode(page: Page, mode: str):
     label = "Видео" if mode == "video" else "Изображение"
     alt = "Video" if mode == "video" else "Image"
-    print(f"[DEBUG] Setting mode: {mode}")
+    log(f"Setting mode: {mode}", "DEBUG")
+    
     try:
-        # Wait for Grok to load enough to show mode buttons
-        page.wait_for_selector(f"text={label}", timeout=10000)
-    except:
-        try:
-            page.wait_for_selector(f"text={alt}", timeout=5000)
-        except: pass
-
-    try:
-        selectors = [
-            f'xpath=//button[contains(., "{label}") or contains(., "{alt}")]',
-            f'xpath=//div[@role="button"][contains(., "{label}") or contains(., "{alt}")]',
-            f'xpath=//span[contains(text(), "{label}") or contains(text(), "{alt}")]',
-            f'text="{label}"',
-            f'text="{alt}"'
-        ]
-        for sel in selectors:
-            target = page.locator(sel).first
-            if target.is_visible(timeout=2000):
-                # Verify if it is already selected by checking parent or class (optional)
-                target.click(force=True)
-                time.sleep(1.5)
-                return True
-    except: pass
+        # Убрали долгие таймауты: если поле ввода уже есть, можно вообще не ждать.
+        # Даем максимум 1.5 секунды на переключение режима (поиск RU/EN текста одновременно)
+        page.locator(f'text="{label}", text="{alt}"').first.click(timeout=1500, force=True)
+        time.sleep(0.5)
+        return True
+    except: 
+        pass
+        
     return False
 
 def dispatch_prompt(page: Page, content: str, aspect_ratio: str):
     try:
         final_query = re.sub(r"--ar\s+\S+", f"--ar {aspect_ratio}", content) if "--ar" in content else f"{content.strip()} --ar {aspect_ratio}"
-        print(f"[DEBUG] Sending prompt: {final_query[:50]}...")
-        area = page.locator('textarea, [contenteditable="true"], [placeholder*="Grok"]').first
-        area.wait_for(state="visible", timeout=15000)
+        log(f"Sending prompt: {final_query[:50]}...", "DEBUG")
+        
+        # Robust check for the input area
+        area = page.locator('textarea, [contenteditable="true"], [placeholder*="Grok"], [aria-label*="Grok"]').first
+        try:
+            area.wait_for(state="visible", timeout=25000)
+        except Exception as e:
+            # Diagnostic: capture what the bot actually sees
+            diag_path = f"error_dispatch_{int(time.time())}.png"
+            page.screenshot(path=diag_path)
+            log(f"Dispatch failed: Input area not found. Diagnostic saved to {diag_path}", "ERROR")
+            log(f"Current URL: {page.url}", "DEBUG")
+            return False
+            
+        time.sleep(1) # Extra settle time
         area.click()
         area.fill(final_query)
         time.sleep(1)
         page.keyboard.press("Enter")
         return True
     except Exception as e:
-        print(f"[ERROR] Dispatch failed: {str(e)}")
+        log(f"Dispatch failed: {str(e)}", "ERROR")
         return False
 
 def attach_asset(page: Page, path: str):
@@ -227,94 +262,95 @@ def inject_persistence_layer(page: Page, identifier: str):
     try: page.evaluate(script)
     except: pass
 
+def log(msg, level="INFO"):
+    t = time.strftime("%H:%M:%S")
+    print(f"[{t}] [{level}] {msg}")
+
 def capture_media(page: Page, name: str, category: str, variant_index: int = 0):
     try:
-        # We look for all potential media nodes
-        nodes_js = """() => {
-            return Array.from(document.querySelectorAll('img, video')).filter(n => n.offsetWidth > 200).map(el => {
-                const tag = el.tagName;
-                let src = el.src || '';
-                if (tag === 'VIDEO' && (!src || src.startsWith('blob:'))) {
-                    const s = el.querySelector('source');
-                    if (s) src = s.src || s;
-                }
-                return { src, tag };
+        log(f"Capturing high-res media for {name} (index {variant_index})...", "CORE")
+        
+        # Wait until the image is likely fully loaded
+        time.sleep(2) 
+        
+        nodes_js = """async () => {
+            const results = [];
+            const nodes = Array.from(document.querySelectorAll('img, video, div, span')).filter(el => {
+                if (el.offsetWidth < 150) return false;
+                if (el.tagName === 'IMG') return el.complete && el.naturalWidth > 200;
+                const bg = window.getComputedStyle(el).backgroundImage;
+                return (el.src || (bg && bg !== 'none'));
             });
+
+            for (const el of nodes) {
+                let src = el.src || el.querySelector('source')?.src;
+                if (!src) {
+                    const bg = window.getComputedStyle(el).backgroundImage;
+                    if (bg && bg.startsWith('url(')) src = bg.slice(4, -1).replace(/["']/g, "");
+                }
+                if (src) results.push({ src, tag: el.tagName });
+            }
+            return results;
         }"""
+        
         payloads = page.evaluate(nodes_js)
-        if not payloads or variant_index >= len(payloads): return False
+        if not payloads:
+            log(f"No sharp media found for {name} after wait", "ERROR")
+            return False
+            
+        if variant_index >= len(payloads): variant_index = 0 # Fallback to first if index lost
         
         target = payloads[variant_index]
         is_vid = target.get('tag') == 'VIDEO'
         
-        # Download logic
-        download_js = """async (src) => {
-            const r = await fetch(src);
-            const b = await r.blob();
-            return await new Promise(res => {
-                const f = new FileReader();
-                f.onloadend = () => res({ b64: f.result.split(',')[1], mime: b.type });
-                f.readAsDataURL(b);
-            });
-        }"""
-        data = page.evaluate(download_js, target['src'])
-        
-        ext = ".mp4" if is_vid else ".jpg"
-        if "webp" in data.get('mime', ''): ext = ".webp"
-        
-        dest = VIDEO_PATH if (is_vid or name.startswith("video_")) else PHOTO_PATH
-        full_path = os.path.join(dest, f"{name}{ext}")
-        
-        with open(full_path, "wb") as f:
-            f.write(base64.b64decode(data['b64']))
+        # Aggressive retry for high-res download
+        for attempt in range(3):
+            download_js = """async (src) => {
+                try {
+                    const r = await fetch(src);
+                    if (!r.ok) return { error: r.status };
+                    const b = await r.blob();
+                    if (b.size < 10000) return { error: "too_small" }; // Skip tiny images
+                    return await new Promise((res) => {
+                        const f = new FileReader();
+                        f.onloadend = () => res({ b64: f.result.split(',')[1], mime: b.type, size: b.size });
+                        f.readAsDataURL(b);
+                    });
+                } catch (e) { return { error: e.message }; }
+            }"""
+            data = page.evaluate(download_js, target['src'])
             
-        commit_progress(category, name)
-        return True
-    except: pass
-    return False
-
-def sync_previews(pages, names, callback):
-    if not callback: return
-    for i, page in enumerate(pages):
-        try:
-            # Detect all variants on page
-            variants_data = page.evaluate("""async () => {
-                const nodes = Array.from(document.querySelectorAll('img, video')).filter(n => 
-                    n.offsetWidth > 200
-                );
-                if (nodes.length === 0) return null;
+            if "error" not in data:
+                ext = ".mp4" if is_vid else ".jpg"
+                if "webp" in data.get('mime', ''): ext = ".webp"
+                dest = VIDEO_PATH if (is_vid or name.startswith("video_")) else PHOTO_PATH
+                full_path = os.path.join(dest, f"{name}{ext}")
                 
-                const results = [];
-                for (const node of nodes) {
-                    try {
-                        const src = node.src || node.querySelector('source')?.src;
-                        if (!src) continue;
-                        const r = await fetch(src);
-                        const b = await r.blob();
-                        const b64 = await new Promise(res => {
-                            const f = new FileReader();
-                            f.onloadend = () => res(f.result.split(',')[1]);
-                            f.readAsDataURL(b);
-                        });
-                        results.push({ b64, is_vid: node.tagName === 'VIDEO' });
-                    } catch {}
-                }
-                return results.slice(0, 4);
-            }""")
-            
-            # Use a marker to only send NEW sets of variants
-            current_count = page.evaluate("document.querySelectorAll('[data-preview-synced]').length")
-            if variants_data and len(variants_data) > current_count:
-                print(f"[DEBUG] Syncing {len(variants_data)} variants to UI for {names[i]}")
-                page.evaluate("document.querySelectorAll('img, video').forEach(n => n.setAttribute('data-preview-synced', 'true'))")
-                callback(names[i], variants_data, False)
-        except Exception as e:
-            print(f"[DEBUG] sync_previews error for {names[i]}: {str(e)}")
+                with open(full_path, "wb") as f:
+                    f.write(base64.b64decode(data['b64']))
+                
+                log(f"Successfully saved sharp image: {name} ({data['size']} bytes)", "CORE")
+                commit_progress(category, name)
+                return True
+                
+            log(f"Download attempt {attempt+1} failed for {name}: {data.get('error')}. Retrying...", "DEBUG")
+            time.sleep(2)
+
+        return False
+    except Exception as e:
+        log(f"capture_media exception for {name}: {str(e)}", "ERROR")
+    return False
 
 def orchestrate_session(pages, names, category, ui_bridge=None):
     kill_switch = threading.Event()
     commands = []
     
+    # CRITICAL: Clear any existing sync flags in the browser tabs from previous runs
+    for p in pages:
+        try:
+            p.evaluate("document.querySelectorAll('[data-synced-to-gui], [data-preview-synced]').forEach(n => { n.removeAttribute('data-synced-to-gui'); n.removeAttribute('data-preview-synced'); })")
+        except: pass
+
     def internal_sync(n, d, v):
         if ui_bridge:
             if n:
@@ -331,24 +367,74 @@ def orchestrate_session(pages, names, category, ui_bridge=None):
     
     threading.Thread(target=watcher, daemon=True).start()
     
+    log(f"Session started for {category}. Waiting for manual selection in GUI...", "CORE")
+    
     while not kill_switch.is_set():
         internal_sync(None, None, None)
+        
         while commands:
             cmd = commands.pop(0)
             if cmd['name'] in names:
                 idx = names.index(cmd['name'])
                 p = pages[idx]
                 if cmd['action'] == 'save':
-                    # cmd now should contain 'variant_index'
                     v_idx = cmd.get('variant_index', 0)
+                    log(f"Manual save command received for {cmd['name']} (variant {v_idx})", "CORE")
                     capture_media(p, cmd['name'], category, variant_index=v_idx)
                 elif cmd['action'] == 'regen':
+                    log(f"Regeneration command received for {cmd['name']}", "CORE")
                     p.bring_to_front()
                     p.keyboard.press("Enter")
-                    p.evaluate("document.querySelectorAll('[data-preview-synced]').forEach(n => n.removeAttribute('data-preview-synced'))")
+                    # Clear flags on regen to allow new images to sync
+                    p.evaluate("document.querySelectorAll('[data-synced-to-gui]').forEach(n => n.removeAttribute('data-synced-to-gui'))")
 
         sync_previews(pages, names, internal_sync)
-        time.sleep(0.5)
+        time.sleep(1)
+
+def sync_previews(pages, names, callback):
+    if not callback: return
+    for i, page in enumerate(pages):
+        try:
+            diag_js = """async () => {
+                const results = [];
+                const nodes = Array.from(document.querySelectorAll('img, video, [style*="background-image"]'))
+                                   .filter(n => n.offsetWidth > 40);
+                
+                for (const node of nodes) {
+                    try {
+                        let src = node.src || node.querySelector('source')?.src;
+                        if (!src) {
+                            const bg = window.getComputedStyle(node).backgroundImage;
+                            if (bg && bg.startsWith('url(')) src = bg.slice(4, -1).replace(/["']/g, "");
+                        }
+                        
+                        if (!src || src.includes('data:image/svg+xml')) continue;
+                        if (node.hasAttribute('data-synced-to-gui')) continue;
+
+                        const r = await fetch(src);
+                        if (!r.ok) continue;
+                        const b = await r.blob();
+                        if (b.size < 1000) continue;
+
+                        const b64 = await new Promise(res => {
+                            const f = new FileReader();
+                            f.onloadend = () => res(f.result.split(',')[1]);
+                            f.readAsDataURL(b);
+                        });
+                        
+                        node.setAttribute('data-synced-to-gui', 'true');
+                        results.push({ b64, is_vid: node.tagName === 'VIDEO' });
+                    } catch (e) {}
+                }
+                return results;
+            }"""
+            
+            variants_data = page.evaluate(diag_js)
+            if variants_data and len(variants_data) > 0:
+                log(f"Sending {len(variants_data)} images for {names[i]} to GUI", "DEBUG")
+                callback(names[i], variants_data, False)
+        except Exception as e:
+            log(f"sync_previews error for {names[i]}: {str(e)}", "DEBUG")
 
 def main(progress_callback=None, ui_bridge=None, base_dir=None, ar_mode="16:9"):
     try:
